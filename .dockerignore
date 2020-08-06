@@ -1,0 +1,8 @@
+infra
+docker
+node_modules
+README.md
+.*
+*.log
+*.sh
+*.yml

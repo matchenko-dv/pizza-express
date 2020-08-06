@@ -1,0 +1,249 @@
+AWSTemplateFormatVersion: '2010-09-09'
+Description: Deploy pizza service on AWS Fargate, hosted in public subnets and use ELB
+Parameters:
+
+  StackName:
+    Type: String
+    Default: cf-base-network
+    Description: The name of the parent Fargate networking stack that you created
+  ServiceName:
+    Type: String
+    Default: pizza-app
+    Description: Name for the app service
+  ClusterName:
+    Type: String
+    Default: pizza-app
+    Description: Name for the ECS cluster
+  ServiceNameRedis:
+    Type: String
+    Default: redis
+    Description: Name for the Redis service
+  ImageUrl:
+    Type: String
+    Default: matchden/pizza-sample-app
+    Description: The url of a docker image that contains the application
+  ImageUrlRedis:
+    Type: String
+    Default: redis:6-alpine
+    Description: The url of a docker image that contains the Redis
+  ContainerPortApp:
+    Type: Number
+    Default: 3000
+    Description: Application container port
+  ContainerPortRedis:
+    Type: Number
+    Default: 6379
+    Description: Redis container port
+  ContainerCpu:
+    Type: Number
+    Default: 512
+    Description: How much CPU to give the task. 1024 is 1 CPU
+  ContainerMemory:
+    Type: Number
+    Default: 1024
+    Description: How much memory in megabytes to give to the task
+  ContainerCpuApp:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemoryApp:
+    Type: Number
+    Default: 256
+    Description: How much memory in megabytes to give the container
+  ContainerCpuRedis:
+    Type: Number
+    Default: 256
+    Description: How much CPU to give the container. 1024 is 1 CPU
+  ContainerMemoryRedis:
+    Type: Number
+    Default: 640
+    Description: How much memory in megabytes to give the container
+  DesiredCount:
+    Type: Number
+    Default: 1
+    Description: How many copies of the service task to run
+  Role:
+    Type: String
+    Default: ""
+    Description: (Optional) An IAM role to give the services containers if the code within needs to
+                 access other AWS resources
+
+Conditions:
+  HasCustomRole: !Not [ !Equals [!Ref 'Role', ''] ]
+
+Resources:
+  # ECS Cluster
+  ECSCluster:
+    Type: AWS::ECS::Cluster
+    Properties:
+      ClusterName: !Ref "ClusterName"
+
+  # Security group for the containers in Fargate.
+  SecurityGroupECS:
+    Type: "AWS::EC2::SecurityGroup"
+    DependsOn:
+      - SecurityGroupELB
+    Properties:
+      GroupDescription: "Access to ECS tasks"
+      VpcId:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'VPCId']]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 3000
+          ToPort: 3000
+          SourceSecurityGroupId: !Ref "SecurityGroupELB"
+#        - IpProtocol: tcp
+#          FromPort: 80
+#          ToPort: 80
+#          CidrIp: "0.0.0.0/0"
+
+  # Public ELB SG
+  SecurityGroupELB:
+    Type: AWS::EC2::SecurityGroup
+    Properties:
+      GroupDescription: Access to the public facing load balancer
+      VpcId:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'VPCId']]
+      SecurityGroupIngress:
+        - IpProtocol: tcp
+          FromPort: 8081
+          ToPort: 8081
+          CidrIp: "0.0.0.0/0"
+
+  # Pulic ELB
+  PublicLoadBalancer:
+    Type: AWS::ElasticLoadBalancingV2::LoadBalancer
+    Properties:
+      Scheme: internet-facing
+      LoadBalancerAttributes:
+      - Key: idle_timeout.timeout_seconds
+        Value: '60'
+      Subnets:
+        # The load balancer is placed into the public subnets
+        - Fn::ImportValue:
+            !Join [':', [!Ref 'StackName', 'PublicSubnetOne']]
+        - Fn::ImportValue:
+            !Join [':', [!Ref 'StackName', 'PublicSubnetTwo']]
+      SecurityGroups: [!Ref 'SecurityGroupELB']
+
+  LogGroupApp:
+    Type: "AWS::Logs::LogGroup"
+    Properties: 
+      LogGroupName: !Join ["/", ["/ecs", !Ref "ServiceName"]]
+      RetentionInDays: 3
+
+  # The task definition. This is a simple metadata description of what
+  # container to run, and what resource requirements it has.
+  TaskDefinition:
+    Type: AWS::ECS::TaskDefinition
+    Properties:
+      Family: !Ref 'ServiceName'
+      Cpu: !Ref 'ContainerCpu'
+      Memory: !Ref 'ContainerMemory'
+      NetworkMode: awsvpc
+      RequiresCompatibilities:
+        - FARGATE
+      ExecutionRoleArn:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'ECSTaskExecutionRole']]
+      TaskRoleArn:
+        Fn::If:
+          - 'HasCustomRole'
+          - !Ref 'Role'
+          - !Ref "AWS::NoValue"
+      ContainerDefinitions:
+        - Name: !Ref 'ServiceName'
+          Essential: false
+          Cpu: !Ref 'ContainerCpuApp'
+          Memory: !Ref 'ContainerMemoryApp'
+          Image: !Ref 'ImageUrl'
+          Command:
+            - "sh"
+            - "-c"
+            - "npm test && npm start"
+          PortMappings:
+            - ContainerPort: !Ref 'ContainerPortApp'
+          DependsOn:
+            - ContainerName: !Ref 'ServiceNameRedis'
+              Condition: START
+          LogConfiguration:
+            LogDriver: "awslogs"
+            Options:
+              awslogs-group: !Ref "LogGroupApp"
+              awslogs-region: !Sub "${AWS::Region}"
+              awslogs-stream-prefix: "out"
+        - Name: !Ref 'ServiceNameRedis'
+          Essential: true
+          Cpu: !Ref 'ContainerCpuRedis'
+          Memory: !Ref 'ContainerMemoryRedis'
+          Image: !Ref 'ImageUrlRedis'
+          PortMappings:
+            - ContainerPort: !Ref 'ContainerPortRedis'
+
+  # Service is a resource which allows you to run multiple
+  # copies of a type of task, and gather up their logs and metrics.
+  Service:
+    Type: AWS::ECS::Service
+    DependsOn: PublicLoadBalancerListener
+    Properties:
+      ServiceName: !Ref 'ServiceName'
+      Cluster: !Ref 'ClusterName'
+      LaunchType: FARGATE
+      DeploymentConfiguration:
+        MaximumPercent: 200
+        MinimumHealthyPercent: 100
+      DesiredCount: !Ref 'DesiredCount'
+      NetworkConfiguration:
+        AwsvpcConfiguration:
+          AssignPublicIp: "ENABLED"
+          SecurityGroups: 
+            - !Ref 'SecurityGroupECS'
+          Subnets:
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnetOne']]
+            - Fn::ImportValue:
+                !Join [':', [!Ref 'StackName', 'PublicSubnetTwo']]
+      TaskDefinition: !Ref 'TaskDefinition'
+      LoadBalancers:
+        - ContainerName: !Ref 'ServiceName'
+          ContainerPort: !Ref 'ContainerPortApp'
+          TargetGroupArn: !Ref 'TargetGroup'
+
+  # A target group. This is used for keeping track of all the tasks, and
+  # what IP addresses / port numbers.
+  TargetGroup:
+    Type: AWS::ElasticLoadBalancingV2::TargetGroup
+    Properties:
+      HealthCheckIntervalSeconds: 30
+      HealthCheckPath: /
+      HealthCheckProtocol: HTTP
+      HealthCheckTimeoutSeconds: 5
+      HealthyThresholdCount: 3
+      TargetType: ip
+      Name: !Ref 'ServiceName'
+      Port: !Ref 'ContainerPortApp'
+      Protocol: HTTP
+      UnhealthyThresholdCount: 2
+      VpcId:
+        Fn::ImportValue:
+          !Join [':', [!Ref 'StackName', 'VPCId']]
+
+  # Public ELB Listener
+  PublicLoadBalancerListener:
+    Type: AWS::ElasticLoadBalancingV2::Listener
+    DependsOn:
+      - PublicLoadBalancer
+    Properties:
+      DefaultActions:
+        - TargetGroupArn: !Ref 'TargetGroup'
+          Type: 'forward'
+      LoadBalancerArn: !Ref 'PublicLoadBalancer'
+      Port: 8081
+      Protocol: HTTP
+
+Outputs:
+  ExternalUrl:
+    Description: The url of the external load balancer
+    Value: !Join ['', ['http://', !GetAtt 'PublicLoadBalancer.DNSName']]

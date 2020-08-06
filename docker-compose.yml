@@ -1,0 +1,25 @@
+version: '3'
+
+services:
+  pizzaapp:
+    image: node:8.4.0-alpine
+    command: /bin/sh -c "npm install && npm test && npm start"
+    container_name: pizzaapp
+    user: node
+    ports:
+      - 8081:3000
+    working_dir: /data/app
+    volumes:
+      - .:/data/app
+    environment:
+      - REDIS_HOST=redis
+      - REDIS_PORT=6379
+    depends_on:
+      - redis
+    links:
+      - redis
+
+  redis:
+    image: redis:6-alpine
+    container_name: redis
+    restart: unless-stopped
